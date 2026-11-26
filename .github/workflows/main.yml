@@ -1,0 +1,205 @@
+
+name: Arete Edu - Flutter Multi-Platform Build
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+
+  # ============================================================
+  # ANDROID BUILD
+  # ============================================================
+  build-android:
+    name: Build Arete Edu Android (APK & AAB)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.41.7
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      # --------------------------------------------------------
+      # Configure Android Release Signing
+      # --------------------------------------------------------
+      - name: Configure Android release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -e
+
+          test -n "$KEYSTORE_BASE64" || (echo "Missing keystore" && exit 1)
+          test -n "$KEYSTORE_PASSWORD" || (echo "Missing keystore password" && exit 1)
+          test -n "$KEY_ALIAS" || (echo "Missing key alias" && exit 1)
+          test -n "$KEY_PASSWORD" || (echo "Missing key password" && exit 1)
+
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/arete-edu-release.jks
+
+          test -s android/app/arete-edu-release.jks
+
+          cat > android/key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=arete-edu-release.jks
+          EOF
+
+          echo "Arete Edu Android release signing configured successfully."
+
+      # --------------------------------------------------------
+      # Build APK
+      # --------------------------------------------------------
+      - name: Build Arete Edu APK
+        run: flutter build apk --release
+
+      # --------------------------------------------------------
+      # Build AAB
+      # --------------------------------------------------------
+      - name: Build Arete Edu AAB
+        run: flutter build appbundle --release
+
+      # --------------------------------------------------------
+      # Verify Android builds
+      # --------------------------------------------------------
+      - name: Verify Android release files
+        run: |
+          ls -lh build/app/outputs/flutter-apk/app-release.apk
+          ls -lh build/app/outputs/bundle/release/app-release.aab
+
+      # --------------------------------------------------------
+      # Upload APK
+      # --------------------------------------------------------
+      - name: Upload Arete Edu APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: arete-edu-android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      # --------------------------------------------------------
+      # Upload AAB
+      # --------------------------------------------------------
+      - name: Upload Arete Edu AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: arete-edu-android-aab
+          path: build/app/outputs/bundle/release/app-release.aab
+
+
+  # ============================================================
+  # iOS BUILD
+  # ============================================================
+  build-ios:
+    name: Build Arete Edu iOS IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.41.7
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      # --------------------------------------------------------
+      # Import Apple certificate
+      # --------------------------------------------------------
+      - name: Install Apple certificate
+        env:
+          IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+
+          printf '%s' "$IOS_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+
+          openssl pkcs12 \
+            -in "$CERTIFICATE_PATH" \
+            -info \
+            -noout \
+            -passin pass:"$IOS_CERTIFICATE_PASSWORD"
+
+          security create-keychain -p "temporary" "$KEYCHAIN_PATH"
+
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+
+          security unlock-keychain -p "temporary" "$KEYCHAIN_PATH"
+
+          security import "$CERTIFICATE_PATH" \
+            -P "$IOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s -k "temporary" "$KEYCHAIN_PATH"
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+      # --------------------------------------------------------
+      # Install provisioning profile
+      # --------------------------------------------------------
+      - name: Install provisioning profile
+        env:
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
+
+          printf '%s' "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+
+          cp "$PROFILE_PATH" \
+            "$HOME/Library/MobileDevice/Provisioning Profiles/"
+
+      # --------------------------------------------------------
+      # Check Xcode signing identities
+      # --------------------------------------------------------
+      - name: Check signing identities
+        run: |
+          security find-identity -v -p codesigning \
+            "$RUNNER_TEMP/build.keychain-db"
+
+      # --------------------------------------------------------
+      # Build signed IPA
+      # --------------------------------------------------------
+      - name: Build Arete Edu iOS IPA
+        run: flutter build ipa --release
+
+      # --------------------------------------------------------
+      # Check generated IPA
+      # --------------------------------------------------------
+      - name: Check IPA
+        run: ls -lh build/ios/ipa/
+
+      # --------------------------------------------------------
+      # Upload IPA
+      # --------------------------------------------------------
+      - name: Upload Arete Edu IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: arete-edu-ios-ipa
+          path: build/ios/ipa/*.ipa
